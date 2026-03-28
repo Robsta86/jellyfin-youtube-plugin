@@ -14,7 +14,8 @@
   </ItemGroup>
 
   <ItemGroup>
-    <EmbeddedResource Include="Configuration/configurationpage.html" />
+    <EmbeddedResource Include="Web/youtubeSyncConfig.html" />
+    <EmbeddedResource Include="Web/youtubeSyncConfig.js" />
   </ItemGroup>
 
   <ItemGroup>

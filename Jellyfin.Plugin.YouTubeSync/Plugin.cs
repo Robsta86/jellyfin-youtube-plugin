@@ -37,12 +37,18 @@ public class Plugin : BasePlugin<PluginConfiguration>, IHasWebPages
     /// <inheritdoc />
     public IEnumerable<PluginPageInfo> GetPages()
     {
+        var ns = GetType().Namespace;
         return new[]
         {
             new PluginPageInfo
             {
-                Name = Name,
-                EmbeddedResourcePath = GetType().Namespace + ".Configuration.configurationpage.html"
+                Name = "youtubeSyncConfig",
+                EmbeddedResourcePath = $"{ns}.Web.youtubeSyncConfig.html"
+            },
+            new PluginPageInfo
+            {
+                Name = "youtubeSyncConfigjs",
+                EmbeddedResourcePath = $"{ns}.Web.youtubeSyncConfig.js"
             }
         };
     }
