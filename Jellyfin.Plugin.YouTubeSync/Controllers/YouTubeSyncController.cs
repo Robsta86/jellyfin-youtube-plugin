@@ -39,7 +39,7 @@ public class YouTubeSyncController : ControllerBase
 
     /// <summary>
     /// Resolves a YouTube video ID to a direct CDN URL and returns an HTTP 302 redirect.
-    /// Returns 503 when no compatible progressive format is available (DASH-only video).
+    /// Returns 503 when no compatible progressive format is available.
     /// </summary>
     /// <param name="videoId">The YouTube video ID (e.g. dQw4w9WgXcQ).</param>
     /// <param name="cancellationToken">Cancellation token.</param>
@@ -65,8 +65,7 @@ public class YouTubeSyncController : ControllerBase
                 videoId);
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
-                $"No compatible progressive AVC/AAC format found for video '{videoId}'. "
-                + "Only DASH streams are available (not supported in v1).");
+                $"No compatible progressive AVC/AAC format found for video '{videoId}'.");
         }
 
         return Redirect(url);
@@ -103,3 +102,4 @@ public class YouTubeSyncController : ControllerBase
         return Ok(info);
     }
 }
+

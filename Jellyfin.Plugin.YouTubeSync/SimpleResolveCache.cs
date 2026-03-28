@@ -35,3 +35,4 @@ public class SimpleResolveCache
         _cache[videoId] = new CacheEntry(url, DateTime.UtcNow.AddMinutes(minutes));
     }
 }
+

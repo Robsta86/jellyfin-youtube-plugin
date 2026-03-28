@@ -1,4 +1,7 @@
+using System;
+using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.Extensions.Logging;
 
@@ -39,6 +42,8 @@ public class FormatSelector
             return null;
         }
 
+        LogAvailableFormats(formats);
+
         // Tier 1: best progressive stream ≤1080p – highest resolution wins; MP4 preferred at equal resolution.
         var best = PickBest(formats, maxHeight: 1080)
             // Tier 2: any progressive stream – fallback when no ≤1080p progressive stream exists.
@@ -47,17 +52,17 @@ public class FormatSelector
         if (best is null)
         {
             _logger.LogInformation(
-                "No progressive format found. "
-                + "Only DASH or split streams are available. "
-                + "DASH proxy is not supported in v1.");
+                "No progressive format found. Only DASH or split streams are available.");
             return null;
         }
 
         var url = best["url"]?.GetValue<string>();
-        _logger.LogDebug(
-            "Selected format: id={FormatId} height={Height} tbr={Tbr}",
+        _logger.LogInformation(
+            "Selected format: id={FormatId} height={Height}p ext={Ext} vcodec={VCodec} tbr={Tbr}",
             GetString(best, "format_id"),
             GetInt(best, "height"),
+            GetString(best, "ext"),
+            ShortenCodec(GetString(best, "vcodec")),
             GetDouble(best, "tbr"));
 
         return url;
@@ -82,7 +87,88 @@ public class FormatSelector
             .FirstOrDefault();
     }
 
-    // ── helpers ──────────────────────────────────────────────────────────────
+    // ── logging ──────────────────────────────────────────────────────────────
+
+    private void LogAvailableFormats(JsonArray formats)
+    {
+        var progressive = new List<string>();
+        var dashVideo = new List<string>();
+        var dashAudio = new List<string>();
+        var other = new List<string>();
+
+        foreach (var f in formats.Where(f => f is not null))
+        {
+            var line = FormatSummary(f!);
+            if (IsProgressive(f))
+            {
+                progressive.Add(line);
+            }
+            else if (IsVideoOnlyDash(f))
+            {
+                dashVideo.Add(line);
+            }
+            else if (IsAudioOnlyDash(f))
+            {
+                dashAudio.Add(line);
+            }
+            else
+            {
+                other.Add(line);
+            }
+        }
+
+        // Always log the summary and eligible progressive formats at Information so this
+        // is visible without enabling Debug logging in Jellyfin.
+        var progressiveSection = progressive.Count > 0
+            ? "  Progressive (combined video+audio) – eligible for selection:\n"
+              + string.Join("\n", progressive.Select(l => $"    {l}"))
+            : "  Progressive: none found.";
+
+        _logger.LogInformation(
+            "Available formats ({Total} total, {PCount} progressive, {DVCount} DASH-video, "
+            + "{DACount} DASH-audio, {OCount} other/storyboard):\n{ProgressiveSection}",
+            formats.Count,
+            progressive.Count,
+            dashVideo.Count,
+            dashAudio.Count,
+            other.Count,
+            progressiveSection);
+
+        // Full per-stream DASH details are verbose; keep them at Debug.
+        if (!_logger.IsEnabled(LogLevel.Debug))
+        {
+            return;
+        }
+
+        var sb = new StringBuilder();
+
+        if (dashVideo.Count > 0)
+        {
+            sb.AppendLine("  DASH video-only (dropped – no audio):");
+            dashVideo.ForEach(l => sb.AppendLine($"    {l}"));
+        }
+
+        if (dashAudio.Count > 0)
+        {
+            sb.AppendLine("  DASH audio-only (dropped – no video):");
+            dashAudio.ForEach(l => sb.AppendLine($"    {l}"));
+        }
+
+        if (sb.Length > 0)
+        {
+            _logger.LogDebug("{DashFormatList}", sb.ToString().TrimEnd());
+        }
+    }
+
+    private static string FormatSummary(JsonNode f) =>
+        $"[{GetString(f, "format_id"),6}] "
+        + $"{GetInt(f, "height"),4}p "
+        + $"{GetString(f, "ext"),-4} "
+        + $"v={ShortenCodec(GetString(f, "vcodec")),-8} "
+        + $"a={ShortenCodec(GetString(f, "acodec")),-8} "
+        + $"tbr={GetDouble(f, "tbr"),8:F1}";
+
+    // ── stream type predicates ────────────────────────────────────────────────
 
     private static bool IsProgressive(JsonNode? f)
     {
@@ -92,8 +178,36 @@ public class FormatSelector
             && acodec != "none" && acodec.Length > 0;
     }
 
+    private static bool IsVideoOnlyDash(JsonNode? f)
+    {
+        var vcodec = GetString(f, "vcodec");
+        var acodec = GetString(f, "acodec");
+        return vcodec != "none" && vcodec.Length > 0 && acodec == "none";
+    }
+
+    private static bool IsAudioOnlyDash(JsonNode? f)
+    {
+        var vcodec = GetString(f, "vcodec");
+        var acodec = GetString(f, "acodec");
+        return vcodec == "none" && acodec != "none" && acodec.Length > 0;
+    }
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
     private static bool IsMp4(JsonNode? f)
         => GetString(f, "ext") == "mp4";
+
+    private static string ShortenCodec(string codec)
+    {
+        if (codec.Length == 0 || codec == "none")
+        {
+            return codec;
+        }
+
+        // "avc1.640028" → "avc1",  "mp4a.40.2" → "mp4a"
+        var dot = codec.IndexOf('.');
+        return dot < 0 ? codec : codec[..dot];
+    }
 
     private static string GetString(JsonNode? node, string key)
     {
@@ -107,15 +221,35 @@ public class FormatSelector
         }
     }
 
+    /// <summary>
+    /// Returns the integer value of a JSON numeric field.
+    /// Handles the case where yt-dlp emits heights as JSON floats (e.g. <c>720.0</c>)
+    /// which would otherwise cause <see cref="System.Text.Json.Nodes.JsonNode.GetValue{T}"/>
+    /// to throw and silently fall back to 0, corrupting the sort order.
+    /// </summary>
     private static int GetInt(JsonNode? node, string key)
     {
-        try
-        {
-            return node?[key]?.GetValue<int>() ?? 0;
-        }
-        catch
+        if (node?[key] is not { } valueNode)
         {
             return 0;
+        }
+
+        try
+        {
+            return valueNode.GetValue<int>();
+        }
+        catch (InvalidOperationException)
+        {
+            // Some yt-dlp versions emit integer fields as JSON doubles (e.g. 720.0).
+            // Fall back to double → int conversion so height ordering is not corrupted.
+            try
+            {
+                return (int)valueNode.GetValue<double>();
+            }
+            catch
+            {
+                return 0;
+            }
         }
     }
 
@@ -131,3 +265,4 @@ public class FormatSelector
         }
     }
 }
+

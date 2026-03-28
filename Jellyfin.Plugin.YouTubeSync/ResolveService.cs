@@ -53,8 +53,7 @@ public class ResolveService
         if (url is null)
         {
             _logger.LogWarning(
-                "No compatible progressive format found for video {VideoId}. "
-                + "Returning null – DASH proxy not supported in v1.",
+                "No compatible progressive format found for video {VideoId}.",
                 videoId);
             return null;
         }
@@ -70,3 +69,4 @@ public class ResolveService
         return url;
     }
 }
+
