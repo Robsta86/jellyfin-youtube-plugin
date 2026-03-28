@@ -52,7 +52,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x'
+          dotnet-version: '9.0.x'
 
       # ── 5. Build & publish (Release) ───────────────────────────────────────
       - name: Publish plugin
@@ -90,22 +90,30 @@ jobs:
       # ── 9. Update manifest.json on the default branch ─────────────────────
       - name: Update manifest.json
         run: |
-          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.version.outputs.ZIP_NAME }}"
-          TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          VERSION="${{ steps.version.outputs.ASSEMBLY_VERSION }}"
-          CHECKSUM="${{ steps.checksum.outputs.MD5 }}"
+          export TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          DEFAULT_BRANCH=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
+          git fetch origin "${DEFAULT_BRANCH}"
+          export DEFAULT_BRANCH
+          export VERSION="${{ steps.version.outputs.ASSEMBLY_VERSION }}"
+          export CHECKSUM="${{ steps.checksum.outputs.MD5 }}"
+          export DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.version.outputs.ZIP_NAME }}"
 
           python3 - << 'PYEOF'
-          import json, os
+          import json, os, subprocess
 
-          path = "manifest.json"
-          with open(path) as f:
-              data = json.load(f)
+          default_branch = os.environ["DEFAULT_BRANCH"]
+
+          # Read manifest.json from the default branch so prior versions are preserved
+          raw = subprocess.check_output(
+              ["git", "show", f"origin/{default_branch}:manifest.json"],
+              text=True
+          )
+          data = json.loads(raw)
 
           new_entry = {
               "version":    os.environ["VERSION"],
               "changelog":  f"Release {os.environ['VERSION']}",
-              "targetAbi":  "10.9.0.0",
+              "targetAbi":  "10.11.6.0",
               "sourceUrl":  os.environ["DOWNLOAD_URL"],
               "checksum":   os.environ["CHECKSUM"],
               "timestamp":  os.environ["TIMESTAMP"]
@@ -114,15 +122,11 @@ jobs:
           # Prepend so the newest version is first
           data[0]["versions"].insert(0, new_entry)
 
-          with open(path, "w") as f:
+          # Write to a temp file so the branch switch in the next step doesn't clobber it
+          with open("/tmp/updated-manifest.json", "w") as f:
               json.dump(data, f, indent=2)
               f.write("\n")
           PYEOF
-        env:
-          VERSION: ${{ steps.version.outputs.ASSEMBLY_VERSION }}
-          CHECKSUM: ${{ steps.checksum.outputs.MD5 }}
-          TIMESTAMP: ${{ steps.version.outputs.TAG_VERSION }}   # reuse tag as timestamp seed
-          DOWNLOAD_URL: "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/${{ steps.version.outputs.ZIP_NAME }}"
 
       # ── 10. Commit the updated manifest.json back to main ─────────────────
       - name: Commit manifest.json
@@ -130,13 +134,12 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # Switch to (or create) the default branch
           DEFAULT_BRANCH=$(git remote show origin | awk '/HEAD branch/ {print $NF}')
           git fetch origin "${DEFAULT_BRANCH}"
           git checkout "${DEFAULT_BRANCH}"
 
-          # The manifest was updated on the tagged commit; copy it over
-          git checkout "${{ github.ref_name }}" -- manifest.json
+          # Use the manifest built in the previous step (not the tag's copy)
+          cp /tmp/updated-manifest.json manifest.json
 
           git add manifest.json
           git diff --cached --quiet && echo "manifest.json unchanged – nothing to commit" && exit 0
