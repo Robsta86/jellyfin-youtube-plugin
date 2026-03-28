@@ -91,11 +91,6 @@ public class FormatSelector
 
     private void LogAvailableFormats(JsonArray formats)
     {
-        if (!_logger.IsEnabled(LogLevel.Debug))
-        {
-            return;
-        }
-
         var progressive = new List<string>();
         var dashVideo = new List<string>();
         var dashAudio = new List<string>();
@@ -122,23 +117,30 @@ public class FormatSelector
             }
         }
 
-        var sb = new StringBuilder();
-        sb.AppendLine(
-            $"Available formats ({formats.Count} total, "
-            + $"{progressive.Count} progressive, "
-            + $"{dashVideo.Count} DASH-video, "
-            + $"{dashAudio.Count} DASH-audio, "
-            + $"{other.Count} other/storyboard):");
+        // Always log the summary and eligible progressive formats at Information so this
+        // is visible without enabling Debug logging in Jellyfin.
+        var progressiveSection = progressive.Count > 0
+            ? "  Progressive (combined video+audio) – eligible for selection:\n"
+              + string.Join("\n", progressive.Select(l => $"    {l}"))
+            : "  Progressive: none found.";
 
-        if (progressive.Count > 0)
+        _logger.LogInformation(
+            "Available formats ({Total} total, {PCount} progressive, {DVCount} DASH-video, "
+            + "{DACount} DASH-audio, {OCount} other/storyboard):\n{ProgressiveSection}",
+            formats.Count,
+            progressive.Count,
+            dashVideo.Count,
+            dashAudio.Count,
+            other.Count,
+            progressiveSection);
+
+        // Full per-stream DASH details are verbose; keep them at Debug.
+        if (!_logger.IsEnabled(LogLevel.Debug))
         {
-            sb.AppendLine("  Progressive (combined video+audio) – eligible for selection:");
-            progressive.ForEach(l => sb.AppendLine($"    {l}"));
+            return;
         }
-        else
-        {
-            sb.AppendLine("  Progressive: none found.");
-        }
+
+        var sb = new StringBuilder();
 
         if (dashVideo.Count > 0)
         {
@@ -152,7 +154,10 @@ public class FormatSelector
             dashAudio.ForEach(l => sb.AppendLine($"    {l}"));
         }
 
-        _logger.LogDebug("{FormatList}", sb.ToString().TrimEnd());
+        if (sb.Length > 0)
+        {
+            _logger.LogDebug("{DashFormatList}", sb.ToString().TrimEnd());
+        }
     }
 
     private static string FormatSummary(JsonNode f) =>
