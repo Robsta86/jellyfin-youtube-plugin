@@ -61,6 +61,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddSingleton<YtDlpService>();
+        serviceCollection.AddSingleton<DashMergeCacheService>();
         serviceCollection.AddSingleton<FormatSelector>();
         serviceCollection.AddSingleton<SimpleResolveCache>();
         serviceCollection.AddSingleton<ResolveService>();

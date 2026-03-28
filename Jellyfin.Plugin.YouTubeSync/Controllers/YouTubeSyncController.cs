@@ -1,4 +1,3 @@
-using System;
 using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
@@ -23,18 +22,18 @@ namespace Jellyfin.Plugin.YouTubeSync.Controllers;
 [Produces(MediaTypeNames.Application.Json)]
 public class YouTubeSyncController : ControllerBase
 {
+    private readonly DashMergeCacheService _dashMergeCacheService;
     private readonly ResolveService _resolveService;
-    private readonly YtDlpService _ytDlpService;
     private readonly ILogger<YouTubeSyncController> _logger;
 
     /// <summary>Initializes a new instance of the <see cref="YouTubeSyncController"/> class.</summary>
     public YouTubeSyncController(
+        DashMergeCacheService dashMergeCacheService,
         ResolveService resolveService,
-        YtDlpService ytDlpService,
         ILogger<YouTubeSyncController> logger)
     {
+        _dashMergeCacheService = dashMergeCacheService;
         _resolveService = resolveService;
-        _ytDlpService = ytDlpService;
         _logger = logger;
     }
 
@@ -81,55 +80,20 @@ public class YouTubeSyncController : ControllerBase
             return StatusCode(StatusCodes.Status503ServiceUnavailable, "Invalid playback result.");
         }
 
-        using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
-            cancellationToken,
-            HttpContext.RequestAborted);
+        var mergedFilePath = await _dashMergeCacheService
+            .GetOrCreateAsync(videoId, result.DashVideoUrl!, result.DashAudioUrl!, HttpContext.RequestAborted)
+            .ConfigureAwait(false);
 
-        await using var muxSession = _ytDlpService.StartDashMux(result.DashVideoUrl!, result.DashAudioUrl!);
-        if (muxSession is null)
+        if (string.IsNullOrWhiteSpace(mergedFilePath))
         {
             return StatusCode(
                 StatusCodes.Status503ServiceUnavailable,
-                "Failed to start ffmpeg for live DASH merge. Check the configured ffmpeg path or PATH.");
+                "Failed to prepare the merged DASH file. Check the configured ffmpeg path or PATH.");
         }
 
-        using var cancellationRegistration = linkedCancellation.Token.Register(muxSession.Stop);
-
-        _logger.LogInformation("Streaming live DASH merge for video {VideoId}", videoId);
-
-        Response.StatusCode = StatusCodes.Status200OK;
-        Response.ContentType = "video/mp2t";
+        _logger.LogInformation("Serving cached DASH merge for video {VideoId} from {MergedFilePath}", videoId, mergedFilePath);
         Response.Headers.CacheControl = "no-store";
-
-        try
-        {
-            await Response.StartAsync(linkedCancellation.Token).ConfigureAwait(false);
-            await muxSession.CopyOutputToAsync(Response.Body, linkedCancellation.Token).ConfigureAwait(false);
-            await Response.Body.FlushAsync(linkedCancellation.Token).ConfigureAwait(false);
-            await muxSession.EnsureCompletedAsync(linkedCancellation.Token).ConfigureAwait(false);
-            return new EmptyResult();
-        }
-        catch (OperationCanceledException) when (linkedCancellation.IsCancellationRequested)
-        {
-            _logger.LogInformation(
-                "Client disconnected or playback was cancelled for video {VideoId}; stopping ffmpeg merge.",
-                videoId);
-            return new EmptyResult();
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Live DASH merge failed for video {VideoId}", videoId);
-
-            if (!Response.HasStarted)
-            {
-                return StatusCode(
-                    StatusCodes.Status503ServiceUnavailable,
-                    "ffmpeg failed while live-merging the selected DASH streams.");
-            }
-
-            HttpContext.Abort();
-            return new EmptyResult();
-        }
+        return PhysicalFile(mergedFilePath, "video/mp4", enableRangeProcessing: true);
     }
 
     /// <summary>

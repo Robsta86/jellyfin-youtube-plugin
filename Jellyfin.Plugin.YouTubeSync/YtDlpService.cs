@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.IO;
 using System.Text.Json.Nodes;
 using System.Threading;
 using System.Threading.Tasks;
@@ -121,42 +122,67 @@ public class YtDlpService
     }
 
     /// <summary>
-    /// Starts an ffmpeg process that live-merges DASH video and audio into an MPEG-TS stream.
+    /// Merges DASH video and audio into a normal MP4 file that can be served with range support.
     /// </summary>
-    public FfmpegMuxSession? StartDashMux(string videoUrl, string audioUrl)
+    public async Task<bool> MergeDashToFileAsync(
+        string videoUrl,
+        string audioUrl,
+        string outputPath,
+        CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo
         {
             FileName = FfmpegPath,
-            RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
 
-        foreach (var arg in BuildFfmpegMuxArguments(videoUrl, audioUrl))
+        foreach (var arg in BuildFfmpegFileArguments(videoUrl, audioUrl, outputPath))
         {
             psi.ArgumentList.Add(arg);
         }
 
         _logger.LogDebug("Running ffmpeg with arguments: {Arguments}", string.Join(" ", psi.ArgumentList));
 
+        using var process = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        using var cancellationRegistration = cancellationToken.Register(() => StopProcess(process));
+
         try
         {
-            var process = new Process { StartInfo = psi };
             process.Start();
+            var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            var error = await errorTask.ConfigureAwait(false);
 
-            _logger.LogInformation(
-                "Started ffmpeg merge process {ProcessId} using binary {FfmpegPath}",
-                process.Id,
-                psi.FileName);
+            if (process.ExitCode != 0)
+            {
+                _logger.LogError(
+                    "ffmpeg exited with code {ExitCode} while merging DASH. Stderr: {Error}",
+                    process.ExitCode,
+                    error);
+                return false;
+            }
 
-            return new FfmpegMuxSession(process, _logger);
+            if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
+            {
+                _logger.LogError("ffmpeg completed but produced no output file at {OutputPath}", outputPath);
+                return false;
+            }
+
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("Cancelled ffmpeg DASH merge for output {OutputPath}", outputPath);
+            StopProcess(process);
+            return false;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to start ffmpeg using binary '{FfmpegPath}'", psi.FileName);
-            return null;
+            _logger.LogError(ex, "Failed to run ffmpeg using binary '{FfmpegPath}'", psi.FileName);
+            StopProcess(process);
+            return false;
         }
     }
 
@@ -210,12 +236,13 @@ public class YtDlpService
         }
     }
 
-    private static IEnumerable<string> BuildFfmpegMuxArguments(string videoUrl, string audioUrl)
+    private static IEnumerable<string> BuildFfmpegFileArguments(string videoUrl, string audioUrl, string outputPath)
     {
         yield return "-nostdin";
         yield return "-hide_banner";
         yield return "-loglevel";
         yield return "warning";
+        yield return "-y";
         yield return "-reconnect";
         yield return "1";
         yield return "-reconnect_streamed";
@@ -232,12 +259,22 @@ public class YtDlpService
         yield return "1:a:0";
         yield return "-c";
         yield return "copy";
-        yield return "-muxpreload";
-        yield return "0";
-        yield return "-muxdelay";
-        yield return "0";
-        yield return "-f";
-        yield return "mpegts";
-        yield return "pipe:1";
+        yield return "-movflags";
+        yield return "+faststart";
+        yield return outputPath;
+    }
+
+    private static void StopProcess(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+        }
     }
 }
