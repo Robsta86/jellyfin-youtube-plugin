@@ -5,7 +5,7 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.YouTubeSync;
 
 /// <summary>
-/// Orchestrates the resolution of a YouTube video ID to a playable CDN URL.
+/// Orchestrates the resolution of a YouTube video ID to a playable format selection.
 /// Results are stored in <see cref="SimpleResolveCache"/> to avoid calling yt-dlp on every request.
 /// </summary>
 public class ResolveService
@@ -29,10 +29,10 @@ public class ResolveService
     }
 
     /// <summary>
-    /// Resolves a YouTube video ID to a direct CDN URL.
+    /// Resolves a YouTube video ID to the best available <see cref="SelectedFormat"/>.
     /// Returns <c>null</c> if resolution fails or no compatible format is available.
     /// </summary>
-    public async Task<string?> ResolveAsync(string videoId, CancellationToken cancellationToken)
+    public async Task<SelectedFormat?> ResolveAsync(string videoId, CancellationToken cancellationToken)
     {
         if (_cache.TryGet(videoId, out var cached))
         {
@@ -49,24 +49,23 @@ public class ResolveService
             return null;
         }
 
-        var url = _formatSelector.SelectBestFormat(info);
-        if (url is null)
+        var format = _formatSelector.SelectBestFormat(info);
+        if (format is null)
         {
-            _logger.LogWarning(
-                "No compatible progressive format found for video {VideoId}. "
-                + "Returning null – DASH proxy not supported in v1.",
-                videoId);
+            _logger.LogWarning("No compatible format found for video {VideoId}.", videoId);
             return null;
         }
 
         var cacheMinutes = Plugin.Instance?.Configuration.CacheMinutes ?? 5;
-        _cache.Set(videoId, url, cacheMinutes);
+        _cache.Set(videoId, format, cacheMinutes);
 
         _logger.LogInformation(
-            "Resolved {VideoId} – cached for {Minutes} min",
+            "Resolved {VideoId} → {FormatType} height={Height}p – cached for {Minutes} min",
             videoId,
+            format.NeedsMuxing ? "DASH" : "progressive",
+            format.Height,
             cacheMinutes);
 
-        return url;
+        return format;
     }
 }
