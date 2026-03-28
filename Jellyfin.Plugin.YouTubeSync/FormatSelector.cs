@@ -8,16 +8,12 @@ using Microsoft.Extensions.Logging;
 namespace Jellyfin.Plugin.YouTubeSync;
 
 /// <summary>
-/// Selects the best Jellyfin-compatible (progressive, ≤1080p) format
-/// from a yt-dlp JSON response.
+/// Selects the best playback strategy from a yt-dlp JSON response.
 ///
-/// Selection uses a tiered fallback strategy:
-///   Tier 1: Progressive stream ≤1080p  – highest resolution, then MP4-preferred, then highest bitrate.
-///   Tier 2: Any progressive stream     – last resort when no ≤1080p progressive stream exists.
-///   DASH-only (split video/audio) streams are always rejected.
-///
-/// MP4 is preferred as a secondary tiebreaker (same resolution), but a higher-resolution
-/// non-MP4 stream (e.g. H264/ADTS in a TS container) is always preferred over a lower-resolution MP4.
+/// Selection uses one rule set:
+///   1. Prefer a progressive stream at or below 1080p.
+///   2. Otherwise select a DASH video-only stream at or below 1080p plus a DASH audio-only stream
+///      so the controller can live-merge them with ffmpeg.
 /// </summary>
 public class FormatSelector
 {
@@ -30,10 +26,10 @@ public class FormatSelector
     }
 
     /// <summary>
-    /// Returns the direct CDN URL for the best progressive format, or <c>null</c> when
-    /// no compatible progressive format exists (i.e. only split DASH streams are available).
+    /// Returns the best playback result for a video, or <c>null</c> when no compatible
+    /// progressive or DASH fallback streams are available.
     /// </summary>
-    public string? SelectBestFormat(JsonNode videoInfo)
+    public PlaybackResolveResult? SelectBestFormat(JsonNode videoInfo)
     {
         var formats = videoInfo["formats"]?.AsArray();
         if (formats is null || formats.Count == 0)
@@ -44,47 +40,86 @@ public class FormatSelector
 
         LogAvailableFormats(formats);
 
-        // Tier 1: best progressive stream ≤1080p – highest resolution wins; MP4 preferred at equal resolution.
-        var best = PickBest(formats, maxHeight: 1080)
-            // Tier 2: any progressive stream – fallback when no ≤1080p progressive stream exists.
-            ?? PickBest(formats, maxHeight: null);
+        var bestProgressive = PickBestProgressive(formats, maxHeight: 1080);
+        if (bestProgressive is not null)
+        {
+            var url = bestProgressive["url"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                _logger.LogInformation(
+                    "Selected progressive format: id={FormatId} height={Height}p ext={Ext} vcodec={VCodec} acodec={ACodec} tbr={Tbr}",
+                    GetString(bestProgressive, "format_id"),
+                    GetInt(bestProgressive, "height"),
+                    GetString(bestProgressive, "ext"),
+                    ShortenCodec(GetString(bestProgressive, "vcodec")),
+                    ShortenCodec(GetString(bestProgressive, "acodec")),
+                    GetDouble(bestProgressive, "tbr"));
 
-        if (best is null)
+                return PlaybackResolveResult.Redirect(url);
+            }
+        }
+
+        var dashPair = PickBestDashPair(formats, maxHeight: 1080);
+        if (dashPair is null)
         {
             _logger.LogInformation(
-                "No progressive format found. Only DASH or split streams are available.");
+                "No compatible progressive or DASH fallback format found.");
             return null;
         }
 
-        var url = best["url"]?.GetValue<string>();
         _logger.LogInformation(
-            "Selected format: id={FormatId} height={Height}p ext={Ext} vcodec={VCodec} tbr={Tbr}",
-            GetString(best, "format_id"),
-            GetInt(best, "height"),
-            GetString(best, "ext"),
-            ShortenCodec(GetString(best, "vcodec")),
-            GetDouble(best, "tbr"));
+            "Selected DASH fallback: videoId={VideoFormatId} videoHeight={VideoHeight}p videoExt={VideoExt} vcodec={VCodec} audioId={AudioFormatId} audioExt={AudioExt} acodec={ACodec}",
+            GetString(dashPair.Video, "format_id"),
+            GetInt(dashPair.Video, "height"),
+            GetString(dashPair.Video, "ext"),
+            ShortenCodec(GetString(dashPair.Video, "vcodec")),
+            GetString(dashPair.Audio, "format_id"),
+            GetString(dashPair.Audio, "ext"),
+            ShortenCodec(GetString(dashPair.Audio, "acodec")));
 
-        return url;
+        return PlaybackResolveResult.DashMerge(dashPair.VideoUrl, dashPair.AudioUrl);
     }
 
-    private static JsonNode? PickBest(JsonArray formats, int? maxHeight)
+    private static JsonNode? PickBestProgressive(JsonArray formats, int maxHeight)
     {
-        var query = formats
+        return formats
             .Where(f => f is not null)
-            .Where(IsProgressive);
-
-        if (maxHeight.HasValue)
-        {
-            var limit = maxHeight.Value;
-            query = query.Where(f => GetInt(f, "height") <= limit);
-        }
-
-        return query
+            .Where(IsProgressive)
+            .Where(f => GetInt(f, "height") > 0 && GetInt(f, "height") <= maxHeight)
             .OrderByDescending(f => GetInt(f, "height"))
             .ThenByDescending(f => IsMp4(f) ? 1 : 0)
             .ThenByDescending(f => GetDouble(f, "tbr"))
             .FirstOrDefault();
+    }
+
+    private static DashPair? PickBestDashPair(JsonArray formats, int maxHeight)
+    {
+        var video = formats
+            .Where(f => f is not null)
+            .Where(IsVideoOnlyDash)
+            .Where(f => GetInt(f, "height") > 0 && GetInt(f, "height") <= maxHeight)
+            .Where(HasUrl)
+            .OrderByDescending(f => GetInt(f, "height"))
+            .ThenByDescending(f => IsAvc1(f) ? 1 : 0)
+            .ThenByDescending(f => IsMp4(f) ? 1 : 0)
+            .ThenByDescending(f => GetDouble(f, "tbr"))
+            .FirstOrDefault();
+
+        var audio = formats
+            .Where(f => f is not null)
+            .Where(IsAudioOnlyDash)
+            .Where(HasUrl)
+            .OrderByDescending(f => IsMp4Audio(f) ? 1 : 0)
+            .ThenByDescending(f => GetDouble(f, "abr"))
+            .ThenByDescending(f => GetDouble(f, "tbr"))
+            .FirstOrDefault();
+
+        var videoUrl = video?["url"]?.GetValue<string>();
+        var audioUrl = audio?["url"]?.GetValue<string>();
+
+        return !string.IsNullOrWhiteSpace(videoUrl) && !string.IsNullOrWhiteSpace(audioUrl)
+            ? new DashPair(video!, audio!, videoUrl, audioUrl)
+            : null;
     }
 
     // ── logging ──────────────────────────────────────────────────────────────
@@ -197,6 +232,22 @@ public class FormatSelector
     private static bool IsMp4(JsonNode? f)
         => GetString(f, "ext") == "mp4";
 
+    private static bool IsMp4Audio(JsonNode? f)
+    {
+        var ext = GetString(f, "ext");
+        var acodec = ShortenCodec(GetString(f, "acodec"));
+        return ext == "m4a" || ext == "mp4" || acodec == "mp4a";
+    }
+
+    private static bool IsAvc1(JsonNode? f)
+    {
+        var vcodec = ShortenCodec(GetString(f, "vcodec"));
+        return vcodec == "avc1" || vcodec == "h264";
+    }
+
+    private static bool HasUrl(JsonNode? f)
+        => !string.IsNullOrWhiteSpace(GetString(f, "url"));
+
     private static string ShortenCodec(string codec)
     {
         if (codec.Length == 0 || codec == "none")
@@ -264,5 +315,7 @@ public class FormatSelector
             return 0d;
         }
     }
+
+    private sealed record DashPair(JsonNode Video, JsonNode Audio, string VideoUrl, string AudioUrl);
 }
 

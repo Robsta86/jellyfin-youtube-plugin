@@ -23,6 +23,9 @@ public class YtDlpService
     }
 
     private string YtDlpPath => Plugin.Instance?.Configuration.YtDlpPath ?? "yt-dlp";
+    private string FfmpegPath => string.IsNullOrWhiteSpace(Plugin.Instance?.Configuration.FfmpegPath)
+        ? "ffmpeg"
+        : Plugin.Instance!.Configuration.FfmpegPath;
 
     /// <summary>
     /// Returns full yt-dlp JSON metadata for a single video (equivalent to <c>yt-dlp -J</c>).
@@ -117,6 +120,46 @@ public class YtDlpService
         };
     }
 
+    /// <summary>
+    /// Starts an ffmpeg process that live-merges DASH video and audio into a fragmented MP4 stream.
+    /// </summary>
+    public FfmpegMuxSession? StartDashMux(string videoUrl, string audioUrl)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = FfmpegPath,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        foreach (var arg in BuildFfmpegMuxArguments(videoUrl, audioUrl))
+        {
+            psi.ArgumentList.Add(arg);
+        }
+
+        _logger.LogDebug("Running ffmpeg with arguments: {Arguments}", string.Join(" ", psi.ArgumentList));
+
+        try
+        {
+            var process = new Process { StartInfo = psi };
+            process.Start();
+
+            _logger.LogInformation(
+                "Started ffmpeg merge process {ProcessId} using binary {FfmpegPath}",
+                process.Id,
+                psi.FileName);
+
+            return new FfmpegMuxSession(process, _logger);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start ffmpeg using binary '{FfmpegPath}'", psi.FileName);
+            return null;
+        }
+    }
+
     private async Task<JsonNode?> RunYtDlpJsonAsync(IEnumerable<string> arguments, CancellationToken cancellationToken)
     {
         var psi = new ProcessStartInfo
@@ -165,5 +208,35 @@ public class YtDlpService
             _logger.LogError(ex, "Failed to run yt-dlp");
             return null;
         }
+    }
+
+    private static IEnumerable<string> BuildFfmpegMuxArguments(string videoUrl, string audioUrl)
+    {
+        yield return "-nostdin";
+        yield return "-hide_banner";
+        yield return "-loglevel";
+        yield return "warning";
+        yield return "-reconnect";
+        yield return "1";
+        yield return "-reconnect_streamed";
+        yield return "1";
+        yield return "-reconnect_delay_max";
+        yield return "2";
+        yield return "-i";
+        yield return videoUrl;
+        yield return "-i";
+        yield return audioUrl;
+        yield return "-map";
+        yield return "0:v:0";
+        yield return "-map";
+        yield return "1:a:0";
+        yield return "-c";
+        yield return "copy";
+        yield return "-shortest";
+        yield return "-movflags";
+        yield return "+frag_keyframe+empty_moov+default_base_moof";
+        yield return "-f";
+        yield return "mp4";
+        yield return "pipe:1";
     }
 }
