@@ -20,6 +20,7 @@ namespace Jellyfin.Plugin.YouTubeSync;
 public class SyncService
 {
     private const int MaxPerSourceConcurrency = 4;
+    private static readonly TimeSpan ArtworkDownloadTimeout = TimeSpan.FromSeconds(20);
 
     private static readonly HttpClient HttpClient = new();
 
@@ -48,12 +49,19 @@ public class SyncService
         for (var i = 0; i < sources.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            await SyncSourceAsync(sources[i], cancellationToken).ConfigureAwait(false);
-            progress.Report((double)(i + 1) / sources.Count * 100);
+            var sourceProgressBase = (double)i / sources.Count * 100;
+            var sourceProgressSpan = 100d / sources.Count;
+            await SyncSourceAsync(sources[i], progress, sourceProgressBase, sourceProgressSpan, cancellationToken).ConfigureAwait(false);
+            progress.Report(sourceProgressBase + sourceProgressSpan);
         }
     }
 
-    private async Task SyncSourceAsync(SourceDefinition source, CancellationToken cancellationToken)
+    private async Task SyncSourceAsync(
+        SourceDefinition source,
+        IProgress<double> progress,
+        double sourceProgressBase,
+        double sourceProgressSpan,
+        CancellationToken cancellationToken)
     {
         var config = Plugin.Instance!.Configuration;
         var sourceInfo = await _ytDlpService.GetSourceInfoAsync(source.Url, cancellationToken).ConfigureAwait(false);
@@ -74,6 +82,8 @@ public class SyncService
 
         var sourceDir = Path.Combine(config.LibraryBasePath, SanitizeFileName(name));
 
+        _logger.LogInformation("Starting sync for source '{Name}'", name);
+
         Directory.CreateDirectory(sourceDir);
         await WriteSourceMetadataAsync(source, sourceDir, name, description, thumbnailUrl, posterUrl, cancellationToken).ConfigureAwait(false);
 
@@ -81,9 +91,16 @@ public class SyncService
             .GetPlaylistEntriesAsync(source.Url, config.VideoRetentionDays, cancellationToken)
             .ConfigureAwait(false);
 
+        _logger.LogInformation(
+            "Fetched {Count} playlist entr{Suffix} for source '{Name}'",
+            entries.Count,
+            entries.Count == 1 ? "y" : "ies",
+            name);
+
         var videos = new ConcurrentBag<VideoMetadata>();
         var desiredVideoDirectories = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         var desiredSeasonDirectories = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
+        var metadataProcessed = 0;
 
         await Parallel.ForEachAsync(
                 entries,
@@ -94,55 +111,71 @@ public class SyncService
                 },
                 async (entry, innerCancellationToken) =>
                 {
-                    var videoId = GetString(entry, "id");
-                    if (string.IsNullOrWhiteSpace(videoId))
+                    try
                     {
-                        return;
-                    }
+                        var videoId = GetString(entry, "id");
+                        if (string.IsNullOrWhiteSpace(videoId))
+                        {
+                            return;
+                        }
 
-                    var metadata = await _ytDlpService.GetVideoMetadataAsync(videoId, innerCancellationToken).ConfigureAwait(false)
-                        ?? BuildFallbackVideoMetadata(entry, videoId, name);
+                        var metadata = await _ytDlpService.GetVideoMetadataAsync(videoId, innerCancellationToken).ConfigureAwait(false)
+                            ?? BuildFallbackVideoMetadata(entry, videoId, name);
 
-                    NormalizeVideoMetadata(metadata, entry, videoId, name);
+                        NormalizeVideoMetadata(metadata, entry, videoId, name);
 
-                    if (metadata.PublishedUtc is null)
-                    {
-                        metadata.PublishedUtc = await _ytDlpService.GetVideoPublishedDateAsync(videoId, innerCancellationToken)
+                        if (metadata.PublishedUtc is null)
+                        {
+                            metadata.PublishedUtc = await _ytDlpService.GetVideoPublishedDateAsync(videoId, innerCancellationToken)
+                                .ConfigureAwait(false);
+                        }
+
+                        if (metadata.PublishedUtc is null)
+                        {
+                            _logger.LogWarning(
+                                "Skipping video {VideoId} during sync for source {SourceName} because no published date could be extracted.",
+                                videoId,
+                                name);
+                            return;
+                        }
+
+                        if (retentionCutoffUtc is DateTime cutoffUtc
+                            && metadata.PublishedUtc is DateTime publishedUtc
+                            && publishedUtc < cutoffUtc)
+                        {
+                            return;
+                        }
+
+                        videos.Add(metadata);
+
+                        var seasonFolder = GetSeasonFolderName(metadata.PublishedUtc, source.Mode);
+                        var parentDir = string.IsNullOrEmpty(seasonFolder)
+                            ? sourceDir
+                            : Path.Combine(sourceDir, seasonFolder);
+                        var videoDir = Path.Combine(parentDir, BuildVideoFolderName(metadata.Title, metadata.VideoId));
+
+                        desiredVideoDirectories.TryAdd(videoDir, 0);
+                        if (!string.IsNullOrEmpty(seasonFolder))
+                        {
+                            desiredSeasonDirectories.TryAdd(parentDir, 0);
+                        }
+
+                        await WriteVideoShellAsync(metadata, videoDir, config.JellyfinBaseUrl, innerCancellationToken)
                             .ConfigureAwait(false);
                     }
-
-                    if (metadata.PublishedUtc is null)
+                    finally
                     {
-                        _logger.LogWarning(
-                            "Skipping video {VideoId} during sync for source {SourceName} because no published date could be extracted.",
-                            videoId,
+                        ReportPhaseProgress(
+                            progress,
+                            sourceProgressBase,
+                            sourceProgressSpan,
+                            Interlocked.Increment(ref metadataProcessed),
+                            entries.Count,
+                            0.0,
+                            0.5,
+                            "metadata",
                             name);
-                        return;
                     }
-
-                    if (retentionCutoffUtc is DateTime cutoffUtc
-                        && metadata.PublishedUtc is DateTime publishedUtc
-                        && publishedUtc < cutoffUtc)
-                    {
-                        return;
-                    }
-
-                    videos.Add(metadata);
-
-                    var seasonFolder = GetSeasonFolderName(metadata.PublishedUtc, source.Mode);
-                    var parentDir = string.IsNullOrEmpty(seasonFolder)
-                        ? sourceDir
-                        : Path.Combine(sourceDir, seasonFolder);
-                    var videoDir = Path.Combine(parentDir, BuildVideoFolderName(metadata.Title, metadata.VideoId));
-
-                    desiredVideoDirectories.TryAdd(videoDir, 0);
-                    if (!string.IsNullOrEmpty(seasonFolder))
-                    {
-                        desiredSeasonDirectories.TryAdd(parentDir, 0);
-                    }
-
-                    await WriteVideoShellAsync(metadata, videoDir, config.JellyfinBaseUrl, innerCancellationToken)
-                        .ConfigureAwait(false);
                 })
             .ConfigureAwait(false);
 
@@ -157,6 +190,7 @@ public class SyncService
             name);
 
         var seasonEpisodeCounters = BuildSeasonEpisodeCounters(retainedVideos, source.Mode);
+        var filesWritten = 0;
 
         await Parallel.ForEachAsync(
                 retainedVideos,
@@ -167,24 +201,40 @@ public class SyncService
                 },
                 async (video, innerCancellationToken) =>
                 {
-                    var seasonFolder = GetSeasonFolderName(video.PublishedUtc, source.Mode);
-                    var parentDir = string.IsNullOrEmpty(seasonFolder)
-                        ? sourceDir
-                        : Path.Combine(sourceDir, seasonFolder);
-                    var videoDir = Path.Combine(parentDir, BuildVideoFolderName(video.Title, video.VideoId));
-                    var seasonNumber = GetSeasonNumber(video.PublishedUtc, source.Mode);
-                    var episodeNumber = GetEpisodeNumber(video, seasonEpisodeCounters, source.Mode);
+                    try
+                    {
+                        var seasonFolder = GetSeasonFolderName(video.PublishedUtc, source.Mode);
+                        var parentDir = string.IsNullOrEmpty(seasonFolder)
+                            ? sourceDir
+                            : Path.Combine(sourceDir, seasonFolder);
+                        var videoDir = Path.Combine(parentDir, BuildVideoFolderName(video.Title, video.VideoId));
+                        var seasonNumber = GetSeasonNumber(video.PublishedUtc, source.Mode);
+                        var episodeNumber = GetEpisodeNumber(video, seasonEpisodeCounters, source.Mode);
 
-                    await WriteVideoFilesAsync(
-                            video,
-                            source.Mode,
-                            seasonNumber,
-                            episodeNumber,
-                            videoDir,
-                            config.JellyfinBaseUrl,
-                            name,
-                            innerCancellationToken)
-                        .ConfigureAwait(false);
+                        await WriteVideoFilesAsync(
+                                video,
+                                source.Mode,
+                                seasonNumber,
+                                episodeNumber,
+                                videoDir,
+                                config.JellyfinBaseUrl,
+                                name,
+                                innerCancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        ReportPhaseProgress(
+                            progress,
+                            sourceProgressBase,
+                            sourceProgressSpan,
+                            Interlocked.Increment(ref filesWritten),
+                            retainedVideos.Count,
+                            0.5,
+                            1.0,
+                            "files",
+                            name);
+                    }
                 })
             .ConfigureAwait(false);
 
@@ -193,6 +243,8 @@ public class SyncService
             source.Mode,
             new HashSet<string>(desiredSeasonDirectories.Keys, StringComparer.OrdinalIgnoreCase),
             new HashSet<string>(desiredVideoDirectories.Keys, StringComparer.OrdinalIgnoreCase));
+
+        _logger.LogInformation("Completed sync for source '{Name}'", name);
     }
 
     private async Task WriteVideoShellAsync(
@@ -276,9 +328,18 @@ public class SyncService
             : BuildCollectionNfo(source, name, description, thumbnailUrl);
 
         await File.WriteAllTextAsync(nfoPath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
-        await DownloadArtworkAsync(thumbnailUrl, dir, new[] { "folder" }, cancellationToken).ConfigureAwait(false);
-        await DownloadArtworkAsync(string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl, dir, new[] { "poster" }, cancellationToken).ConfigureAwait(false);
-        await DownloadArtworkAsync(string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl, dir, new[] { "banner" }, cancellationToken).ConfigureAwait(false);
+
+        var artworkDownloads = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        AddArtworkTarget(artworkDownloads, thumbnailUrl, "folder");
+
+        var posterOrThumbnailUrl = string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl;
+        AddArtworkTarget(artworkDownloads, posterOrThumbnailUrl, "poster");
+        AddArtworkTarget(artworkDownloads, posterOrThumbnailUrl, "banner");
+
+        foreach (var artworkDownload in artworkDownloads)
+        {
+            await DownloadArtworkAsync(artworkDownload.Key, dir, artworkDownload.Value, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private static string BuildTvShowNfo(SourceDefinition source, string name, string description, string thumbnailUrl)
@@ -564,7 +625,10 @@ public class SyncService
 
         try
         {
-            var bytes = await HttpClient.GetByteArrayAsync(imageUrl, cancellationToken).ConfigureAwait(false);
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(ArtworkDownloadTimeout);
+
+            var bytes = await HttpClient.GetByteArrayAsync(imageUrl, timeoutCts.Token).ConfigureAwait(false);
             var extension = GetImageExtension(imageUrl);
 
             foreach (var baseName in baseNames)
@@ -574,9 +638,35 @@ public class SyncService
                 await File.WriteAllBytesAsync(targetPath, bytes, cancellationToken).ConfigureAwait(false);
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogWarning(
+                "Timed out downloading artwork from {ImageUrl} after {TimeoutSeconds} seconds.",
+                imageUrl,
+                ArtworkDownloadTimeout.TotalSeconds);
+        }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Failed to download artwork from {ImageUrl}", imageUrl);
+            _logger.LogWarning(ex, "Failed to download artwork from {ImageUrl}", imageUrl);
+        }
+    }
+
+    private static void AddArtworkTarget(Dictionary<string, List<string>> artworkDownloads, string imageUrl, string baseName)
+    {
+        if (string.IsNullOrWhiteSpace(imageUrl))
+        {
+            return;
+        }
+
+        if (!artworkDownloads.TryGetValue(imageUrl, out var baseNames))
+        {
+            baseNames = new List<string>();
+            artworkDownloads[imageUrl] = baseNames;
+        }
+
+        if (!baseNames.Contains(baseName, StringComparer.OrdinalIgnoreCase))
+        {
+            baseNames.Add(baseName);
         }
     }
 
@@ -624,6 +714,38 @@ public class SyncService
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Failed to delete obsolete synced directory {DirectoryPath}", directoryPath);
+        }
+    }
+
+    private void ReportPhaseProgress(
+        IProgress<double> progress,
+        double sourceProgressBase,
+        double sourceProgressSpan,
+        int completed,
+        int total,
+        double phaseStartFraction,
+        double phaseEndFraction,
+        string phaseName,
+        string sourceName)
+    {
+        if (total <= 0)
+        {
+            progress.Report(sourceProgressBase + sourceProgressSpan * phaseEndFraction);
+            return;
+        }
+
+        var phaseFraction = phaseStartFraction + ((phaseEndFraction - phaseStartFraction) * completed / total);
+        var progressValue = sourceProgressBase + sourceProgressSpan * phaseFraction;
+        progress.Report(progressValue);
+
+        if (completed == 1 || completed == total || completed % 25 == 0)
+        {
+            _logger.LogInformation(
+                "Source '{Name}' {Phase} progress: {Completed}/{Total}",
+                sourceName,
+                phaseName,
+                completed,
+                total);
         }
     }
 
