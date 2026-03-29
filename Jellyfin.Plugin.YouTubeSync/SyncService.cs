@@ -105,6 +105,21 @@ public class SyncService
 
                     NormalizeVideoMetadata(metadata, entry, videoId, name);
 
+                    if (metadata.PublishedUtc is null)
+                    {
+                        metadata.PublishedUtc = await _ytDlpService.GetVideoPublishedDateAsync(videoId, innerCancellationToken)
+                            .ConfigureAwait(false);
+                    }
+
+                    if (metadata.PublishedUtc is null)
+                    {
+                        _logger.LogWarning(
+                            "Skipping video {VideoId} during sync for source {SourceName} because no published date could be extracted.",
+                            videoId,
+                            name);
+                        return;
+                    }
+
                     if (retentionCutoffUtc is DateTime cutoffUtc
                         && metadata.PublishedUtc is DateTime publishedUtc
                         && publishedUtc < cutoffUtc)
@@ -358,29 +373,16 @@ public class SyncService
             Description = GetString(entry, "description"),
             ThumbnailUrl = GetFallbackVideoThumbnailUrl(entry),
             ChannelName = sourceName,
-            PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"))
+            PublishedUtc = YtDlpService.ParsePublishedDate(entry)
         };
     }
 
     private static string GetFallbackVideoThumbnailUrl(JsonNode? entry)
     {
-        var thumbnails = entry?["thumbnails"]?.AsArray();
-        if (thumbnails is { Count: > 0 })
+        var bestUrl = YtDlpService.GetBestVideoThumbnailUrl(entry);
+        if (!string.IsNullOrWhiteSpace(bestUrl))
         {
-            var best = thumbnails
-                .Where(t => t is not null)
-                .OrderByDescending(t =>
-                {
-                    try { return t!["width"]?.GetValue<int>() ?? 0; }
-                    catch { return 0; }
-                })
-                .FirstOrDefault();
-
-            var bestUrl = GetString(best, "url");
-            if (!string.IsNullOrWhiteSpace(bestUrl))
-            {
-                return bestUrl;
-            }
+            return bestUrl;
         }
 
         return GetString(entry, "thumbnail");
@@ -410,24 +412,8 @@ public class SyncService
 
         if (metadata.PublishedUtc is null)
         {
-            metadata.PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"));
+            metadata.PublishedUtc = YtDlpService.ParsePublishedDate(entry);
         }
-    }
-
-    private static DateTime? ParseUploadDate(string uploadDate)
-    {
-        if (uploadDate.Length == 8
-            && DateTime.TryParseExact(
-                uploadDate,
-                "yyyyMMdd",
-                System.Globalization.CultureInfo.InvariantCulture,
-                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
-                out var parsedDate))
-        {
-            return parsedDate;
-        }
-
-        return null;
     }
 
     private static Dictionary<int, Dictionary<string, int>> BuildSeasonEpisodeCounters(
@@ -495,7 +481,7 @@ public class SyncService
             return string.Empty;
         }
 
-        return publishedUtc is DateTime date ? $"Season {date.Year}" : "Unknown Year";
+        return publishedUtc is DateTime date ? $"Season {date.Year}" : string.Empty;
     }
 
     private static string BuildVideoFolderName(string title, string videoId)
@@ -529,10 +515,7 @@ public class SyncService
         {
             if (!Path.GetFileName(seasonDirectory).StartsWith("Season ", StringComparison.OrdinalIgnoreCase))
             {
-                if (!Path.GetFileName(seasonDirectory).Equals("Unknown Year", StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
+                continue;
             }
 
             if (!desiredSeasonDirectories.Contains(seasonDirectory))

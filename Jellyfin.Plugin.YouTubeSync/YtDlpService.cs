@@ -188,12 +188,6 @@ public class YtDlpService
             return null;
         }
 
-        var uploadDate = GetString(result, "upload_date");
-        DateTime? publishedUtc = null;
-        if (uploadDate.Length == 8
-            && DateTime.TryParseExact(uploadDate, "yyyyMMdd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var parsedDate))
-        publishedUtc = parsedDate;
-
         int? durationSeconds = null;
         try
         {
@@ -213,6 +207,36 @@ public class YtDlpService
             PublishedUtc = ParsePublishedDate(result),
             DurationSeconds = durationSeconds
         };
+    }
+
+    /// <summary>
+    /// Fetches just the published date fields for a video as a lightweight fallback when the full metadata lookup lacks a usable date.
+    /// </summary>
+    public async Task<DateTime?> GetVideoPublishedDateAsync(string videoId, CancellationToken cancellationToken)
+    {
+        var url = $"https://www.youtube.com/watch?v={videoId}";
+        var result = await RunYtDlpTextAsync(
+            new[]
+            {
+                "--no-playlist",
+                "--print", "%(upload_date)s",
+                "--print", "%(release_date)s",
+                "--print", "%(timestamp)s",
+                "--print", "%(release_timestamp)s",
+                "--print", "%(release_year)s",
+                url
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (string.IsNullOrWhiteSpace(result))
+        {
+            return null;
+        }
+
+        var lines = result
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+        return ParsePublishedDateFromLines(lines);
     }
 
     /// <summary>
@@ -366,17 +390,17 @@ public class YtDlpService
            || playbackUrl.Contains("/api/manifest/", StringComparison.OrdinalIgnoreCase)
            || playbackUrl.Contains(".mpd", StringComparison.OrdinalIgnoreCase);
 
-    private static string GetBestVideoThumbnailUrl(JsonNode? node)
+    internal static string GetBestVideoThumbnailUrl(JsonNode? node)
     {
         return SelectThumbnailUrl(node?["thumbnails"]?.AsArray(), ThumbnailPreference.Video);
     }
 
-    private static string GetBestSourceAvatarUrl(JsonNode? node)
+    internal static string GetBestSourceAvatarUrl(JsonNode? node)
     {
         return SelectThumbnailUrl(node?["thumbnails"]?.AsArray(), ThumbnailPreference.Avatar);
     }
 
-    private static string GetBestSourcePosterUrl(JsonNode? node)
+    internal static string GetBestSourcePosterUrl(JsonNode? node)
     {
         var banner = SelectThumbnailUrl(node?["thumbnails"]?.AsArray(), ThumbnailPreference.Banner);
         return string.IsNullOrWhiteSpace(banner) ? GetBestSourceAvatarUrl(node) : banner;
@@ -396,39 +420,103 @@ public class YtDlpService
                 Node = t!,
                 Width = GetInt(t, "width"),
                 Height = GetInt(t, "height"),
+                Preference = GetInt(t, "preference"),
                 Url = GetString(t, "url"),
                 Id = GetString(t, "id")
             })
             .Where(t => !string.IsNullOrWhiteSpace(t.Url))
-            .OrderByDescending(t => ScoreThumbnail(t.Width, t.Height, t.Id, preference))
+            .OrderByDescending(t => ScoreThumbnail(t.Width, t.Height, t.Preference, t.Id, t.Url, preference))
+            .ThenByDescending(t => t.Preference)
             .ThenByDescending(t => t.Width)
             .FirstOrDefault();
 
         return best?.Url ?? string.Empty;
     }
 
-    private static double ScoreThumbnail(int width, int height, string id, ThumbnailPreference preference)
+    private static double ScoreThumbnail(int width, int height, int sourcePreference, string id, string url, ThumbnailPreference preference)
     {
+        var inferredSize = InferThumbnailSize(width, height, id, url, preference);
+        width = inferredSize.width;
+        height = inferredSize.height;
+
         if (width <= 0 || height <= 0)
         {
-            return 0;
+            return sourcePreference;
         }
 
         var ratio = (double)width / height;
         var area = width * height;
         var idLower = id.ToLowerInvariant();
+        var urlLower = url.ToLowerInvariant();
 
         return preference switch
         {
-            ThumbnailPreference.Avatar => (1000 - Math.Abs(ratio - 1.0) * 500) + area / 1000.0 + ScoreId(idLower, "avatar", "profile", "channel") - ScoreId(idLower, "banner", "hero"),
-            ThumbnailPreference.Banner => (1000 - Math.Abs(ratio - 1.77) * 300) + area / 1000.0 + ScoreId(idLower, "banner", "hero", "header") - ScoreId(idLower, "avatar", "profile"),
-            _ => (1000 - Math.Abs(ratio - 1.77) * 250) + area / 1000.0 + ScoreId(idLower, "mq", "hq", "sd", "maxres", "video") - ScoreId(idLower, "avatar", "profile", "banner")
+            ThumbnailPreference.Avatar => (1000 - Math.Abs(ratio - 1.0) * 500) + area / 1000.0 + ScoreId(idLower, urlLower, "avatar", "profile", "channel") - ScoreId(idLower, urlLower, "banner", "hero"),
+            ThumbnailPreference.Banner => (1000 - Math.Abs(ratio - 1.77) * 300) + area / 1000.0 + ScoreId(idLower, urlLower, "banner", "hero", "header") - ScoreId(idLower, urlLower, "avatar", "profile"),
+            _ => (1000 - Math.Abs(ratio - 1.77) * 250) + area / 1000.0 + ScoreId(idLower, urlLower, "mq", "hq", "sd", "maxres", "hq720", "video") - ScoreId(idLower, urlLower, "avatar", "profile", "banner")
         };
     }
 
-    private static double ScoreId(string id, params string[] matches)
+    private static (int width, int height) InferThumbnailSize(int width, int height, string id, string url, ThumbnailPreference preference)
     {
-        return matches.Any(id.Contains) ? 200 : 0;
+        if (width > 0 && height > 0)
+        {
+            return (width, height);
+        }
+
+        var key = string.Concat(id, " ", url).ToLowerInvariant();
+
+        if (key.Contains("maxres"))
+        {
+            return (1920, 1080);
+        }
+
+        if (key.Contains("hq720"))
+        {
+            return (1280, 720);
+        }
+
+        if (key.Contains("sddefault") || key.Contains("sd1") || key.Contains("sd2") || key.Contains("sd3"))
+        {
+            return (640, 480);
+        }
+
+        if (key.Contains("hqdefault") || key.Contains("hq1") || key.Contains("hq2") || key.Contains("hq3"))
+        {
+            return (480, 360);
+        }
+
+        if (key.Contains("mqdefault") || key.Contains("mq1") || key.Contains("mq2") || key.Contains("mq3"))
+        {
+            return (320, 180);
+        }
+
+        if (key.Contains("default") || key.Contains("/0.") || key.Contains("/1.") || key.Contains("/2.") || key.Contains("/3."))
+        {
+            return (120, 90);
+        }
+
+        if (key.Contains("banner_uncropped"))
+        {
+            return (2560, 424);
+        }
+
+        if (key.Contains("avatar_uncropped"))
+        {
+            return (900, 900);
+        }
+
+        return preference switch
+        {
+            ThumbnailPreference.Avatar => (900, 900),
+            ThumbnailPreference.Banner => (2560, 424),
+            _ => (0, 0)
+        };
+    }
+
+    private static double ScoreId(string id, string url, params string[] matches)
+    {
+        return matches.Any(match => id.Contains(match) || url.Contains(match)) ? 200 : 0;
     }
 
     private static int GetInt(JsonNode? node, string key)
@@ -437,11 +525,43 @@ public class YtDlpService
         catch (InvalidOperationException) { return 0; }
     }
 
-    private static DateTime? ParsePublishedDate(JsonNode? node)
+    internal static DateTime? ParsePublishedDate(JsonNode? node)
     {
-        foreach (var key in new[] { "upload_date", "release_date" })
+        var directDate = ParsePublishedDateValues(
+            GetScalarString(node, "upload_date"),
+            GetScalarString(node, "release_date"),
+            GetScalarString(node, "timestamp"),
+            GetScalarString(node, "release_timestamp"),
+            GetScalarString(node, "release_year"));
+
+        if (directDate is not null)
         {
-            var value = GetString(node, key);
+            return directDate;
+        }
+
+        return null;
+    }
+
+    private static DateTime? ParsePublishedDateFromLines(IReadOnlyList<string> lines)
+    {
+        var values = new string[5];
+        for (var i = 0; i < values.Length; i++)
+        {
+            values[i] = i < lines.Count ? lines[i] : string.Empty;
+        }
+
+        return ParsePublishedDateValues(values[0], values[1], values[2], values[3], values[4]);
+    }
+
+    private static DateTime? ParsePublishedDateValues(
+        string uploadDate,
+        string releaseDate,
+        string timestamp,
+        string releaseTimestamp,
+        string releaseYear)
+    {
+        foreach (var value in new[] { uploadDate, releaseDate })
+        {
             if (value.Length == 8
                 && DateTime.TryParseExact(
                     value,
@@ -454,31 +574,17 @@ public class YtDlpService
             }
         }
 
-        foreach (var key in new[] { "release_timestamp", "timestamp" })
+        foreach (var value in new[] { releaseTimestamp, timestamp })
         {
-            try
+            if (long.TryParse(value, out var unixTimestamp) && unixTimestamp > 0)
             {
-                var unixTimestamp = node?[key]?.GetValue<long>();
-                if (unixTimestamp.HasValue && unixTimestamp.Value > 0)
-                {
-                    return DateTimeOffset.FromUnixTimeSeconds(unixTimestamp.Value).UtcDateTime;
-                }
-            }
-            catch (InvalidOperationException)
-            {
+                return DateTimeOffset.FromUnixTimeSeconds(unixTimestamp).UtcDateTime;
             }
         }
 
-        try
+        if (int.TryParse(releaseYear, out var year) && year > 0)
         {
-            var year = node?["release_year"]?.GetValue<int>();
-            if (year.HasValue && year.Value > 0)
-            {
-                return new DateTime(year.Value, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            }
-        }
-        catch (InvalidOperationException)
-        {
+            return new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         }
 
         return null;
@@ -489,6 +595,48 @@ public class YtDlpService
         Avatar,
         Banner,
         Video
+    }
+
+    private static string GetScalarString(JsonNode? node, string key)
+    {
+        var value = node?[key];
+        if (value is null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return value.GetValue<string>();
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        try
+        {
+            return value.GetValue<long>().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        try
+        {
+            return value.GetValue<int>().ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        catch (InvalidOperationException)
+        {
+        }
+
+        try
+        {
+            return value.ToJsonString().Trim('"');
+        }
+        catch (InvalidOperationException)
+        {
+            return string.Empty;
+        }
     }
 
     private static string GetString(JsonNode? node, string key)
