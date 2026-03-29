@@ -86,12 +86,12 @@ managed through the UI — no manual file editing is required.
 
 | Setting | Default | Description |
 |---|---|---|
-| yt-dlp executable path | `yt-dlp` | Path to the yt-dlp binary (must be on PATH or provide the full path) |
-| Library base path | `/media/youtube` | Root folder inside a Jellyfin library where .strm/.nfo files are written |
-| Jellyfin base URL | `http://localhost:8096` | Externally accessible Jellyfin URL written into `.strm` resolver links — **set this to your public URL** when clients access Jellyfin remotely |
-| CDN URL cache duration | `5` min | How long a resolved CDN URL is cached in memory before being re-fetched |
+| yt-dlp path | `yt-dlp` | Path to the yt-dlp binary |
+| Library folder | `/media/youtube` | Folder inside a Jellyfin library where YouTube items are created |
+| Jellyfin address | `http://localhost:8096` | Address written into playback links. Use the address your playback devices can actually reach. |
+| Remember playback links for | `5` min | How long playback links are kept before the plugin asks YouTube for fresh ones |
 | Fallback playback preference | `Compatibility first` | Used by Simple playback and as a fallback when Enhanced playback is unavailable |
-| Max videos per source | `200` | Maximum number of videos to sync per channel or playlist (0 = unlimited) |
+| Videos to keep per source | `200` | Maximum number of videos to import from each channel or playlist (`0` = unlimited) |
 | Playback mode | `Simple mode` | `Simple mode` works without ffmpeg. `Enhanced mode` creates a local ffmpeg-backed stream first and falls back automatically if needed |
 | ffmpeg path | `ffmpeg` | Path to the ffmpeg binary used by Enhanced mode |
 | Video encoder | `Software` | Encoder used by Enhanced mode (`Software`, `Intel Quick Sync`, `NVIDIA NVENC`, `VAAPI`, `AMD AMF`) |
@@ -113,17 +113,17 @@ managed through the UI — no manual file editing is required.
 - Enhanced mode is best-effort. If ffmpeg or the selected encoder cannot start, playback automatically falls back to Simple mode.
 - The first Enhanced mode profile normalizes playback to a local HLS stream using H.264 video and AAC audio for broad compatibility.
 
-### Adding a source (channel or playlist)
+### Adding a channel or playlist
 
-Click **+ Add Source** on the settings page.  Each source requires:
+Click **+ Add Channel or Playlist** on the settings page. Each entry needs:
 
 | Field | Description |
 |---|---|
-| Channel / Playlist ID | YouTube channel ID (e.g. `UCxxxxxxxxxxxxxxxxxxxxxx`) or playlist ID (e.g. `PLxxxxxxxxxxxxxxxxxxxxxx`) |
-| Display name | Used as the folder name inside your Jellyfin library |
-| Source type | `Channel` or `Playlist` |
-| Library mode | `Series` — videos appear as TV-show episodes; `Movies` — each video appears as an individual film |
-| Description | Optional text written into the source `.nfo` file |
+| Channel or playlist link | The full YouTube channel or playlist URL |
+| Name in Jellyfin | Display name used in Jellyfin and for the folder name |
+| Content type | `Channel` or `Playlist` |
+| Show videos as | `Episodes in a series` or `Separate movies` |
+| Description | Optional text stored with the channel or playlist |
 
 Click **Save** after adding or modifying sources.
 

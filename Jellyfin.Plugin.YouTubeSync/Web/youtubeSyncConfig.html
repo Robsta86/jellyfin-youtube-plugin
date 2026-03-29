@@ -13,23 +13,23 @@
                 <h3 class="sectionTitle">General</h3>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="YtDlpPath" label="yt-dlp executable path" />
-                    <div class="fieldDescription">Path to the yt-dlp binary. Use <code>yt-dlp</code> if it is on your PATH.</div>
+                    <input is="emby-input" type="text" id="YtDlpPath" label="yt-dlp path" />
+                    <div class="fieldDescription">Path to the yt-dlp binary. Use <code>yt-dlp</code> if it is available on PATH.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="LibraryBasePath" label="Library base path" />
-                    <div class="fieldDescription">Directory where .strm and .nfo files are written. Must be inside a Jellyfin library.</div>
+                    <input is="emby-input" type="text" id="LibraryBasePath" label="Library folder" />
+                    <div class="fieldDescription">Folder where YouTube items are created. This must already be inside a Jellyfin library.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="url" id="JellyfinBaseUrl" label="Jellyfin base URL" />
-                    <div class="fieldDescription">Externally accessible URL of this Jellyfin instance used in .strm resolver links (e.g. <code>https://jellyfin.example.com</code>). Must be reachable by remote clients.</div>
+                    <input is="emby-input" type="url" id="JellyfinBaseUrl" label="Jellyfin address" />
+                    <div class="fieldDescription">Public or local Jellyfin address written into playback links, for example <code>https://jellyfin.example.com</code>. It must be reachable by the devices that will play these items.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="CacheMinutes" label="CDN URL cache duration (minutes)" min="1" max="60" />
-                    <div class="fieldDescription">How long a resolved CDN URL is kept in memory before being re-fetched from YouTube.</div>
+                    <input is="emby-input" type="number" id="CacheMinutes" label="Remember playback links for (minutes)" min="1" max="60" />
+                    <div class="fieldDescription">How long playback links are kept before the plugin asks YouTube for fresh ones.</div>
                 </div>
 
                 <div class="inputContainer">
@@ -42,8 +42,8 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="number" id="MaxVideosPerSource" label="Max videos per source" min="0" />
-                    <div class="fieldDescription">Maximum number of videos to sync per channel or playlist. Set to <code>0</code> for no limit (not recommended for large channels).</div>
+                    <input is="emby-input" type="number" id="MaxVideosPerSource" label="Videos to keep per source" min="0" />
+                    <div class="fieldDescription">Maximum number of videos to import from each channel or playlist. Set to <code>0</code> for no limit.</div>
                 </div>
             </div>
 
@@ -88,8 +88,8 @@
             <!-- YouTube sources list -->
             <div class="verticalSection">
                 <div class="sectionTitleContainer flex align-items-center">
-                    <h3 class="sectionTitle" style="flex:1;">YouTube Sources</h3>
-                    <button is="emby-button" type="button" id="addSourceBtn" class="raised">&#43;&nbsp;Add Source</button>
+                    <h3 class="sectionTitle" style="flex:1;">Channels and Playlists</h3>
+                    <button is="emby-button" type="button" id="addSourceBtn" class="raised">&#43;&nbsp;Add Channel or Playlist</button>
                 </div>
 
                 <div id="sourcesList" class="itemsContainer"></div>
@@ -104,12 +104,12 @@
 
             <!-- Inline add / edit source form (hidden until opened) -->
             <div id="sourceEditSection" class="verticalSection" style="display:none;">
-                <h3 id="editSourceTitle" class="sectionTitle">Add Source</h3>
+                <h3 id="editSourceTitle" class="sectionTitle">Add Channel or Playlist</h3>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="url" id="editSourceUrl" label="YouTube URL" />
+                    <input is="emby-input" type="url" id="editSourceUrl" label="Channel or playlist link" />
                     <div class="fieldDescription">
-                        Paste the full YouTube channel or playlist URL, for example:
+                        Paste the full YouTube channel or playlist link, for example:
                         <code>https://www.youtube.com/@ChannelName</code>,
                         <code>https://www.youtube.com/channel/UCxxxxxx</code>, or
                         <code>https://www.youtube.com/playlist?list=PLxxxxxx</code>.
@@ -118,27 +118,28 @@
                 </div>
 
                 <div class="inputContainer">
-                    <input is="emby-input" type="text" id="editSourceName" label="Display name" />
-                    <div class="fieldDescription">Used as the folder name inside your Jellyfin library.</div>
+                    <input is="emby-input" type="text" id="editSourceName" label="Name in Jellyfin" />
+                    <div class="fieldDescription">Shown in Jellyfin and used for the folder name inside your library.</div>
                 </div>
 
                 <div class="inputContainer">
-                    <select is="emby-select" id="editSourceType" label="Source type">
+                    <select is="emby-select" id="editSourceType" label="Content type">
                         <option value="Channel">Channel</option>
                         <option value="Playlist">Playlist</option>
                     </select>
                 </div>
 
                 <div class="inputContainer">
-                    <select is="emby-select" id="editSourceMode" label="Library mode">
-                        <option value="Series">Series - videos appear as TV-show episodes</option>
-                        <option value="Movies">Movies - each video appears as an individual film</option>
+                    <select is="emby-select" id="editSourceMode" label="Show videos as">
+                        <option value="Series">Episodes in a series</option>
+                        <option value="Movies">Separate movies</option>
                     </select>
+                    <div class="fieldDescription">Choose how this source should appear inside Jellyfin.</div>
                 </div>
 
                 <div class="inputContainer">
                     <input is="emby-input" type="text" id="editSourceDescription" label="Description (optional)" />
-                    <div class="fieldDescription">Written into the source .nfo file.</div>
+                    <div class="fieldDescription">Optional text stored with this channel or playlist.</div>
                 </div>
 
                 <div style="display:flex;gap:.5em;">
