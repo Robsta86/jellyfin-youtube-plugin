@@ -208,7 +208,7 @@ public class YtDlpService
             VideoId = GetString(result, "id"),
             Title = GetString(result, "title"),
             Description = GetString(result, "description"),
-            ThumbnailUrl = GetBestThumbnailUrl(result),
+            ThumbnailUrl = GetBestVideoThumbnailUrl(result),
             ChannelName = GetString(result, "channel"),
             PublishedUtc = ParsePublishedDate(result),
             DurationSeconds = durationSeconds
@@ -366,14 +366,8 @@ public class YtDlpService
            || playbackUrl.Contains("/api/manifest/", StringComparison.OrdinalIgnoreCase)
            || playbackUrl.Contains(".mpd", StringComparison.OrdinalIgnoreCase);
 
-    private static string GetBestThumbnailUrl(JsonNode? node)
+    private static string GetBestVideoThumbnailUrl(JsonNode? node)
     {
-        var direct = GetString(node, "thumbnail");
-        if (!string.IsNullOrWhiteSpace(direct))
-        {
-            return direct;
-        }
-
         return SelectThumbnailUrl(node?["thumbnails"]?.AsArray(), ThumbnailPreference.Video);
     }
 

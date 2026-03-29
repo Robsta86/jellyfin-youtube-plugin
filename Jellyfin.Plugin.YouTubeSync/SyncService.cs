@@ -263,6 +263,7 @@ public class SyncService
         await File.WriteAllTextAsync(nfoPath, content, Encoding.UTF8, cancellationToken).ConfigureAwait(false);
         await DownloadArtworkAsync(thumbnailUrl, dir, new[] { "folder" }, cancellationToken).ConfigureAwait(false);
         await DownloadArtworkAsync(string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl, dir, new[] { "poster" }, cancellationToken).ConfigureAwait(false);
+        await DownloadArtworkAsync(string.IsNullOrWhiteSpace(posterUrl) ? thumbnailUrl : posterUrl, dir, new[] { "banner" }, cancellationToken).ConfigureAwait(false);
     }
 
     private static string BuildTvShowNfo(SourceDefinition source, string name, string description, string thumbnailUrl)
@@ -355,10 +356,34 @@ public class SyncService
             VideoId = videoId,
             Title = GetString(entry, "title"),
             Description = GetString(entry, "description"),
-            ThumbnailUrl = GetString(entry, "thumbnail"),
+            ThumbnailUrl = GetFallbackVideoThumbnailUrl(entry),
             ChannelName = sourceName,
             PublishedUtc = ParseUploadDate(GetString(entry, "upload_date"))
         };
+    }
+
+    private static string GetFallbackVideoThumbnailUrl(JsonNode? entry)
+    {
+        var thumbnails = entry?["thumbnails"]?.AsArray();
+        if (thumbnails is { Count: > 0 })
+        {
+            var best = thumbnails
+                .Where(t => t is not null)
+                .OrderByDescending(t =>
+                {
+                    try { return t!["width"]?.GetValue<int>() ?? 0; }
+                    catch { return 0; }
+                })
+                .FirstOrDefault();
+
+            var bestUrl = GetString(best, "url");
+            if (!string.IsNullOrWhiteSpace(bestUrl))
+            {
+                return bestUrl;
+            }
+        }
+
+        return GetString(entry, "thumbnail");
     }
 
     private static void NormalizeVideoMetadata(VideoMetadata metadata, JsonNode entry, string videoId, string sourceName)
