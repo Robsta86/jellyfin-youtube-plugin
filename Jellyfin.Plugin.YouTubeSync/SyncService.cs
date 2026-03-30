@@ -23,6 +23,7 @@ public class SyncService
     private const int MinimumRetentionEntryScanCount = 25;
     private const int EstimatedUploadsPerDayForRetentionScan = 5;
     private static readonly TimeSpan ArtworkDownloadTimeout = TimeSpan.FromSeconds(20);
+    private static readonly string[] ArtworkExtensions = new[] { ".jpg", ".jpeg", ".png", ".webp" };
 
     private static readonly HttpClient HttpClient = new();
 
@@ -635,6 +636,17 @@ public class SyncService
             return;
         }
 
+        if (baseNames.Count == 0)
+        {
+            return;
+        }
+
+        if (AreAllArtworkTargetsPresent(directory, baseNames))
+        {
+            _logger.LogDebug("Skipping artwork download for {ImageUrl} because all targets already exist in {Directory}", imageUrl, directory);
+            return;
+        }
+
         try
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -645,7 +657,11 @@ public class SyncService
 
             foreach (var baseName in baseNames)
             {
-                DeleteArtworkVariants(directory, baseName);
+                if (HasArtworkVariant(directory, baseName))
+                {
+                    continue;
+                }
+
                 var targetPath = Path.Combine(directory, baseName + extension);
                 await File.WriteAllBytesAsync(targetPath, bytes, cancellationToken).ConfigureAwait(false);
             }
@@ -704,7 +720,7 @@ public class SyncService
 
     private static void DeleteArtworkVariants(string directory, string baseName)
     {
-        foreach (var extension in new[] { ".jpg", ".jpeg", ".png", ".webp" })
+        foreach (var extension in ArtworkExtensions)
         {
             var candidatePath = Path.Combine(directory, baseName + extension);
             if (File.Exists(candidatePath))
@@ -712,6 +728,33 @@ public class SyncService
                 File.Delete(candidatePath);
             }
         }
+    }
+
+    private static bool AreAllArtworkTargetsPresent(string directory, IReadOnlyList<string> baseNames)
+    {
+        foreach (var baseName in baseNames)
+        {
+            if (!HasArtworkVariant(directory, baseName))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HasArtworkVariant(string directory, string baseName)
+    {
+        foreach (var extension in ArtworkExtensions)
+        {
+            var candidatePath = Path.Combine(directory, baseName + extension);
+            if (File.Exists(candidatePath))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void TryDeleteDirectory(string directoryPath)
