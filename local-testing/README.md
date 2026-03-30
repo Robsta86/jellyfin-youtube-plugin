@@ -47,6 +47,8 @@ Run this checklist before releasing changes that touch sync, metadata generation
 8. Playback still resolves for at least one synced item.
 9. If managed transcoding is enabled, one playback succeeds and fallback still works when managed mode cannot start.
 
+On Windows with Docker Desktop, Jellyfin may not immediately detect host-side file changes inside the bind-mounted media folder after a sync. If the `YouTube Test` library looks empty even though sync finished, run `Scan Media Library` once from the Jellyfin dashboard. The bind mount is still correct; this is a file-watch limitation on the local dev setup.
+
 ## Reset the local instance
 
 Stop the container:

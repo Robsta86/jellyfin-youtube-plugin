@@ -31,11 +31,16 @@ via **yt-dlp**, without pre-downloading any content.
 ```bash
 dotnet publish Jellyfin.Plugin.YouTubeSync/Jellyfin.Plugin.YouTubeSync.csproj \
   -c Release \
+   -p:Version=0.0.32.0 \
+   -p:AssemblyVersion=0.0.32.0 \
+   -p:FileVersion=0.0.32.0 \
+   -p:InformationalVersion=0.0.32 \
   --no-self-contained \
   -o publish/
 ```
 
 The output folder will contain `Jellyfin.Plugin.YouTubeSync.dll`.
+If you omit the version properties, the assembly defaults to `1.0.0.0`, which is what Jellyfin shows on the installed plugin screen.
 
 ## Manual deployment
 
@@ -76,6 +81,8 @@ The workflow (`.github/workflows/release.yml`) will:
 2. Package `Jellyfin.Plugin.YouTubeSync.dll` + `meta.json` into a ZIP.
 3. Create a GitHub Release with the ZIP attached.
 4. Update `manifest.json` with the new version entry and push it back to `main`.
+
+The release workflow stamps the assembly version during publish so Jellyfin shows the release version in the installed plugin screen instead of `1.0.0.0`.
 
 ## Configuration
 

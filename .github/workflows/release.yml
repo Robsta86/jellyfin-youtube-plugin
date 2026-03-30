@@ -60,6 +60,10 @@ jobs:
           dotnet publish Jellyfin.Plugin.YouTubeSync/Jellyfin.Plugin.YouTubeSync.csproj \
             -c Release \
             --no-self-contained \
+            -p:Version=${{ steps.version.outputs.ASSEMBLY_VERSION }} \
+            -p:AssemblyVersion=${{ steps.version.outputs.ASSEMBLY_VERSION }} \
+            -p:FileVersion=${{ steps.version.outputs.ASSEMBLY_VERSION }} \
+            -p:InformationalVersion=${{ steps.version.outputs.TAG_VERSION }} \
             -o publish/
 
       # ── 6. Bundle DLL + meta.json into a ZIP ──────────────────────────────

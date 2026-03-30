@@ -7,6 +7,10 @@ using MediaBrowser.Controller.Plugins;
 using MediaBrowser.Model.Plugins;
 using MediaBrowser.Model.Serialization;
 using MediaBrowser.Model.Tasks;
+using Jellyfin.Plugin.YouTubeSync.Configuration;
+using Jellyfin.Plugin.YouTubeSync.Playback;
+using Jellyfin.Plugin.YouTubeSync.Services;
+using Jellyfin.Plugin.YouTubeSync.Sync;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.YouTubeSync;
@@ -61,6 +65,7 @@ public class PluginServiceRegistrator : IPluginServiceRegistrator
     public void RegisterServices(IServiceCollection serviceCollection, IServerApplicationHost applicationHost)
     {
         serviceCollection.AddSingleton<YtDlpService>();
+        serviceCollection.AddSingleton<SyncPlaylistFeedExpander>();
         serviceCollection.AddSingleton<SimpleResolveCache>();
         serviceCollection.AddSingleton<ManagedTranscodeService>();
         serviceCollection.AddSingleton<ResolveService>();
